@@ -979,6 +979,75 @@ def test_batch_decode_rejects_unequal_kv_strides_nvfp4_contract():
         wrapper.run(q, (k_equal, v_unequal))
 
 
+@pytest.mark.parametrize("plan_head_dim, run_head_dim", [(64, 128), (128, 64)])
+def test_batch_decode_rejects_plan_run_head_dim_mismatch(plan_head_dim, run_head_dim):
+    """head_dim is a template parameter of the FA2 CUDA-core decode kernel, so
+    ``plan`` picks the specialization and ``run`` cannot renegotiate it. Nothing
+    downstream can notice the disagreement -- unguarded, both directions return a
+    wrong answer and exit 0 rather than raising.
+
+    The positive control on a matching plan proves the negative case fails on the
+    mismatch and not on the tensors.
+    """
+    torch.manual_seed(42)
+    batch_size = 4
+    kv_len = 54
+    page_size = 8
+    num_kv_heads = 4
+    num_qo_heads = 4
+    dtype = torch.float16
+
+    num_pages_per_seq = (kv_len + page_size - 1) // page_size
+    total_num_pages = num_pages_per_seq * batch_size
+    kv_indptr = (
+        torch.arange(0, batch_size + 1, device="cuda:0", dtype=torch.int32)
+        * num_pages_per_seq
+    )
+    kv_indices = torch.arange(0, total_num_pages, device="cuda:0", dtype=torch.int32)
+    kv_last_page_len = torch.full(
+        (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32, device="cuda:0"
+    )
+    q = torch.randn(
+        batch_size, num_qo_heads, run_head_dim, device="cuda:0", dtype=dtype
+    )
+    kv_data = torch.randn(
+        total_num_pages,
+        2,
+        page_size,
+        num_kv_heads,
+        run_head_dim,
+        device="cuda:0",
+        dtype=dtype,
+    )
+
+    def planned(head_dim):
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device="cuda:0"
+        )
+        wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer, "NHD"
+        )
+        assert not wrapper.use_tensor_cores
+        wrapper.plan(
+            kv_indptr,
+            kv_indices,
+            kv_last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            pos_encoding_mode="NONE",
+            q_data_type=dtype,
+            kv_data_type=dtype,
+        )
+        return wrapper
+
+    planned(run_head_dim).run(q, kv_data)
+
+    with pytest.raises(Exception, match="must agree on head_dim"):
+        planned(plan_head_dim).run(q, kv_data)
+
+
 if __name__ == "__main__":
     test_batch_decode_with_paged_kv_cache(
         256,

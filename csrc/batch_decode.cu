@@ -159,6 +159,11 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
       << "CUDA cores template only supports equal head dim for QK and VO, please use tensor "
          "cores template for different head dim";
 
+  // Unguarded, a disagreeing q runs the wrong specialization and returns a wrong result silently.
+  TVM_FFI_ICHECK_EQ(head_dim_qk, HEAD_DIM_QK)
+      << "plan() selected the head_dim " << HEAD_DIM_QK << " kernel but run() was given q with "
+      << "head_dim " << head_dim_qk << "; plan() and run() must agree on head_dim";
+
   if (maybe_lse.has_value()) {
     const auto& lse = maybe_lse.value();
     TVM_FFI_ICHECK_EQ(lse.size(0), batch_size);
