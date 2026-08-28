@@ -979,6 +979,86 @@ def test_batch_decode_rejects_unequal_kv_strides_nvfp4_contract():
         wrapper.run(q, (k_equal, v_unequal))
 
 
+@pytest.mark.parametrize("plan_num_qo_heads, run_num_qo_heads", [(8, 32), (32, 8)])
+def test_batch_decode_rejects_plan_run_num_qo_heads_mismatch(
+    plan_num_qo_heads, run_num_qo_heads
+):
+    """``plan`` sizes the split-kv scratch buffers (``tmp_v``/``tmp_s``) from the
+    ``num_qo_heads`` it is given, while ``run`` re-derives its own head count
+    from ``q`` and indexes those buffers with it. Unguarded, a run with more
+    heads than the plan writes past them and still exits 0.
+
+    ``use_cuda_graph=True`` is what makes the planner choose the partition-kv
+    path, which is the only path where those buffers exist; on the direct path
+    ``tmp_v`` is null and a head-count disagreement has nothing to corrupt.
+
+    The positive control on a matching plan proves the negative case fails on
+    the mismatch and not on the tensors.
+    """
+    torch.manual_seed(42)
+    batch_size = 4
+    kv_len = 54
+    page_size = 8
+    num_kv_heads = 8
+    head_dim = 128
+    dtype = torch.float16
+
+    num_pages_per_seq = (kv_len + page_size - 1) // page_size
+    total_num_pages = num_pages_per_seq * batch_size
+    kv_indptr = (
+        torch.arange(0, batch_size + 1, device="cuda:0", dtype=torch.int32)
+        * num_pages_per_seq
+    )
+    kv_indices = torch.arange(0, total_num_pages, device="cuda:0", dtype=torch.int32)
+    kv_last_page_len = torch.full(
+        (batch_size,), (kv_len - 1) % page_size + 1, dtype=torch.int32, device="cuda:0"
+    )
+    q = torch.randn(
+        batch_size, run_num_qo_heads, head_dim, device="cuda:0", dtype=dtype
+    )
+    kv_data = torch.randn(
+        total_num_pages,
+        2,
+        page_size,
+        num_kv_heads,
+        head_dim,
+        device="cuda:0",
+        dtype=dtype,
+    )
+
+    def planned(num_qo_heads):
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device="cuda:0"
+        )
+        wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer,
+            "NHD",
+            use_cuda_graph=True,
+            paged_kv_indptr_buffer=torch.empty_like(kv_indptr),
+            paged_kv_indices_buffer=torch.empty_like(kv_indices),
+            paged_kv_last_page_len_buffer=torch.empty_like(kv_last_page_len),
+        )
+        assert not wrapper.use_tensor_cores
+        wrapper.plan(
+            kv_indptr,
+            kv_indices,
+            kv_last_page_len,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            pos_encoding_mode="NONE",
+            q_data_type=dtype,
+            kv_data_type=dtype,
+        )
+        return wrapper
+
+    planned(run_num_qo_heads).run(q, kv_data)
+
+    with pytest.raises(Exception, match="must agree on num_qo_heads"):
+        planned(plan_num_qo_heads).run(q, kv_data)
+
+
 if __name__ == "__main__":
     test_batch_decode_with_paged_kv_cache(
         256,

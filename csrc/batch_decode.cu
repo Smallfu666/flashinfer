@@ -159,6 +159,13 @@ void BatchDecodeWithPagedKVCacheRun(TensorView float_workspace_buffer,
       << "CUDA cores template only supports equal head dim for QK and VO, please use tensor "
          "cores template for different head dim";
 
+  // tmp_v/tmp_s are sized from the plan's head count; the run indexes them with
+  // its own, so a disagreement writes outside them and returns silently.
+  TVM_FFI_ICHECK_EQ(num_qo_heads, plan_info.num_qo_heads)
+      << "plan() reserved workspace for " << plan_info.num_qo_heads
+      << " qo heads but run() was given q with " << num_qo_heads
+      << " heads; plan() and run() must agree on num_qo_heads";
+
   if (maybe_lse.has_value()) {
     const auto& lse = maybe_lse.value();
     TVM_FFI_ICHECK_EQ(lse.size(0), batch_size);

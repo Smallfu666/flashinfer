@@ -374,6 +374,8 @@ struct DecodePlanInfo {
   int64_t kv_chunk_size_ptr_offset;
   bool enable_cuda_graph;
   bool split_kv;
+  // tmp_v/tmp_s are sized from this; the run re-derives its own count from q.
+  int64_t num_qo_heads;
 
   DecodePlanInfo()
       : padded_batch_size(0),
@@ -385,7 +387,8 @@ struct DecodePlanInfo {
         block_valid_mask_offset(0),
         kv_chunk_size_ptr_offset(0),
         enable_cuda_graph(false),
-        split_kv(false) {}
+        split_kv(false),
+        num_qo_heads(0) {}
 
   // convert DecodePlanInfo to std::vector<int64_t>
   std::vector<int64_t> ToVector() const {
@@ -398,14 +401,15 @@ struct DecodePlanInfo {
             block_valid_mask_offset,
             kv_chunk_size_ptr_offset,
             enable_cuda_graph,
-            split_kv};
+            split_kv,
+            num_qo_heads};
   }
 
   // From std::vector<int64_t> to DecodePlanInfo
   void FromVector(const std::vector<int64_t>& vec) {
-    if (vec.size() != 10) {
+    if (vec.size() != 11) {
       std::ostringstream err_msg;
-      err_msg << "DecodePlanInfo::FromVector: vec.size() should be 10, but got " << vec.size();
+      err_msg << "DecodePlanInfo::FromVector: vec.size() should be 11, but got " << vec.size();
       FLASHINFER_ERROR(err_msg.str());
     }
     padded_batch_size = vec[0];
@@ -418,6 +422,7 @@ struct DecodePlanInfo {
     kv_chunk_size_ptr_offset = vec[7];
     enable_cuda_graph = vec[8];
     split_kv = vec[9];
+    num_qo_heads = vec[10];
   }
 };
 
@@ -440,6 +445,7 @@ inline cudaError_t DecodePlanImpl(size_t& float_workspace_size_out, size_t& int_
   size_t padded_batch_size;
   plan_info.enable_cuda_graph = enable_cuda_graph;
   plan_info.split_kv = split_kv;
+  plan_info.num_qo_heads = num_qo_heads;
   padded_batch_size =
       (enable_cuda_graph) ? (split_kv ? max_grid_size / gdy : batch_size) : new_batch_size;
   plan_info.padded_batch_size = padded_batch_size;
